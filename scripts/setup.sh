@@ -1,82 +1,134 @@
 #!/bin/sh
-# Setup script for torque-iot local development environment.
-# Run once after `docker compose up -d` to configure Vault PKI roles and seed a test device.
+# torque-iot local development setup
+#
+# Usage:
+#   ./scripts/setup.sh
+#
+# Bootstraps the full local environment in order:
+#   1. Start step-ca, postgres and rabbitmq
+#   2. Wait for step-ca to become healthy
+#   3. Generate EMQX TLS certificates
+#   4. Issue mqtt-listener service certificate
+#   5. Start EMQX
+#   6. Issue a test device certificate
+#   7. Seed the test device in Postgres
+#
 # Idempotent — safe to run multiple times.
+# Requires: docker, docker compose
 set -e
 
-VAULT_ADDR="http://localhost:8201"
-VAULT_TOKEN="torque"
-COMPOSE_DIR="$(cd "$(dirname "$0")/../infra" && pwd)"
+COMPOSE="docker compose -f $(cd "$(dirname "$0")/../infra" && pwd)/docker-compose.yml"
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+EMQX_CERTS_DIR="$REPO_DIR/certs/emqx"
+LISTENER_CERTS_DIR="$REPO_DIR/certs/listener"
+DEVICE_CERTS_DIR="$REPO_DIR/certs/device"
 
-vault_post() {
-  curl -sf -X POST \
-    -H "X-Vault-Token: $VAULT_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "$2" \
-    "$VAULT_ADDR/v1/$1"
+step_exec() { $COMPOSE exec -T step-ca "$@"; }
+psql_exec() { $COMPOSE exec -T postgres psql -U torque -d torque -c "$1"; }
+
+issue_cert() {
+  CN="$1"
+  OUT_CRT="$2"
+  OUT_KEY="$3"
+  step_exec sh -c "
+    step ca certificate '$CN' /tmp/out.crt /tmp/out.key \
+      --provisioner=torque \
+      --provisioner-password-file=/run/secrets/ca-password \
+      --not-after=8760h \
+      --no-password --insecure \
+      --force > /dev/null 2>&1
+  "
+  $COMPOSE cp step-ca:/tmp/out.crt "$OUT_CRT"
+  $COMPOSE cp step-ca:/tmp/out.key "$OUT_KEY"
 }
 
-psql_exec() {
-  docker compose -f "$COMPOSE_DIR/docker-compose.yml" exec -T postgres \
-    psql -U torque -d torque -c "$1"
+print_step() {
+  echo ""
+  echo "──────────────────────────────────────────────────"
+  printf " %s\n" "$1"
+  echo "──────────────────────────────────────────────────"
 }
 
-# --- PKI roles ---
-echo "==> Creating Vault 'device' role..."
-vault_post "pki/roles/device" '{
-  "allow_any_name": true,
-  "enforce_hostnames": false,
-  "key_type": "ec",
-  "key_bits": 256,
-  "ttl": "8760h",
-  "max_ttl": "87600h",
-  "client_flag": true,
-  "server_flag": false,
-  "no_store": false
-}' > /dev/null
-echo "    done"
+# ──────────────────────────────────────────────────────────────
+print_step "1/7  Starting step-ca, postgres and rabbitmq"
+# ──────────────────────────────────────────────────────────────
+$COMPOSE up -d step-ca postgres rabbitmq
+echo "  ✓ services started"
 
-echo "==> Creating Vault 'service' role..."
-vault_post "pki/roles/service" '{
-  "allow_any_name": false,
-  "allowed_domains": ["torque-listener"],
-  "allow_bare_domains": true,
-  "allow_subdomains": false,
-  "key_type": "ec",
-  "key_bits": 256,
-  "ttl": "8760h",
-  "max_ttl": "87600h",
-  "client_flag": true,
-  "server_flag": false,
-  "enforce_hostnames": false,
-  "cn_validations": []
-}' > /dev/null
-echo "    done"
+# ──────────────────────────────────────────────────────────────
+print_step "2/7  Waiting for step-ca to become healthy"
+# ──────────────────────────────────────────────────────────────
+until step_exec step ca health \
+  --ca-url=https://localhost:9000 \
+  --root=/home/step/certs/root_ca.crt > /dev/null 2>&1; do
+  printf "  waiting...\r"
+  sleep 2
+done
+echo "  ✓ step-ca is healthy"
 
-# --- Test device ---
+# ──────────────────────────────────────────────────────────────
+print_step "3/7  Generating EMQX TLS certificates"
+# ──────────────────────────────────────────────────────────────
+mkdir -p "$EMQX_CERTS_DIR"
+$COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$EMQX_CERTS_DIR/ca.crt"
+issue_cert "emqx" "$EMQX_CERTS_DIR/server.crt" "$EMQX_CERTS_DIR/server.key"
+echo "  ✓ certificates written to $EMQX_CERTS_DIR"
+
+# ──────────────────────────────────────────────────────────────
+print_step "4/7  Issuing mqtt-listener service certificate"
+# ──────────────────────────────────────────────────────────────
+mkdir -p "$LISTENER_CERTS_DIR"
+$COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$LISTENER_CERTS_DIR/ca.crt"
+issue_cert "torque-listener" "$LISTENER_CERTS_DIR/listener.crt" "$LISTENER_CERTS_DIR/listener.key"
+echo "  ✓ certificates written to $LISTENER_CERTS_DIR"
+
+# ──────────────────────────────────────────────────────────────
+print_step "5/7  Starting EMQX"
+# ──────────────────────────────────────────────────────────────
+$COMPOSE up -d emqx
+echo "  ✓ EMQX started"
+
+# ──────────────────────────────────────────────────────────────
+print_step "6/7  Issuing test device certificate"
+# ──────────────────────────────────────────────────────────────
 DEVICE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+mkdir -p "$DEVICE_CERTS_DIR"
+issue_cert "$DEVICE_ID" "$DEVICE_CERTS_DIR/device.crt" "$DEVICE_CERTS_DIR/device.key"
+echo "  ✓ certificate issued for CN: $DEVICE_ID"
+
+# ──────────────────────────────────────────────────────────────
+print_step "7/7  Seeding test device in Postgres"
+# ──────────────────────────────────────────────────────────────
 VEHICLE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
 VEHICLE_VIN="TEST00000000000001"
 
-echo "==> Issuing certificate for test device (CN: $DEVICE_ID)..."
-CERT_JSON=$(vault_post "pki/issue/device" "{\"common_name\": \"$DEVICE_ID\", \"ttl\": \"8760h\"}")
-echo "    done"
-
-echo "==> Seeding test device in Postgres..."
 psql_exec "
   INSERT INTO device.devices (id, name, certificate_cn, vehicle_id, vehicle_vin)
   VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID', '$VEHICLE_VIN')
   ON CONFLICT (certificate_cn) DO NOTHING;
 "
-echo "    done"
 
-# --- Save cert ---
-CERT_FILE="$(cd "$(dirname "$0")/.." && pwd)/.test-device.json"
-printf '%s' "$CERT_JSON" > "$CERT_FILE"
+printf '{\n  "device_id": "%s",\n  "vehicle_id": "%s",\n  "vin": "%s"\n}\n' \
+  "$DEVICE_ID" "$VEHICLE_ID" "$VEHICLE_VIN" > "$DEVICE_CERTS_DIR/meta.json"
+
+echo "  ✓ test device seeded"
 
 echo ""
-echo "Setup complete!"
+echo "══════════════════════════════════════════════════"
+echo " Setup complete!"
+echo "══════════════════════════════════════════════════"
 echo ""
 echo "  Device ID  : $DEVICE_ID"
 echo "  Vehicle VIN: $VEHICLE_VIN"
-echo "  Cert saved : $CERT_FILE  (add to .gitignore if needed)"
+echo ""
+echo "  Certs:"
+echo "    EMQX     → $EMQX_CERTS_DIR"
+echo "    Listener → $LISTENER_CERTS_DIR"
+echo "    Device   → $DEVICE_CERTS_DIR"
+echo ""
+echo "  Services:"
+echo "    step-ca  → https://localhost:9000"
+echo "    emqx     → ssl://localhost:8884"
+echo "    rabbitmq → amqp://localhost:5673  (UI: :15673)"
+echo "    postgres → localhost:5434"
+echo ""
