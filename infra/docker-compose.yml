@@ -38,40 +38,29 @@ services:
     networks:
       - torque-iot
 
-  vault:
-    image: hashicorp/vault:latest
+  step-ca:
+    image: smallstep/step-ca:latest
     restart: unless-stopped
     environment:
-      VAULT_DEV_ROOT_TOKEN_ID: torque
-      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
-    cap_add:
-      - IPC_LOCK
+      DOCKER_STEPCA_INIT_NAME: "Torque IoT CA"
+      DOCKER_STEPCA_INIT_DNS: "step-ca,localhost"
+      DOCKER_STEPCA_INIT_ADDRESS: ":9000"
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: "torque"
+      DOCKER_STEPCA_INIT_PASSWORD_FILE: /run/secrets/ca-password
+      DOCKER_STEPCA_INIT_PROVISIONER_PASSWORD_FILE: /run/secrets/ca-password
     ports:
-      - "8201:8200"
+      - "9000:9000"
+    volumes:
+      - step-ca-data:/home/step
+      - ./step-ca/password.txt:/run/secrets/ca-password:ro
     healthcheck:
-      test: ["CMD", "vault", "status", "-address=http://localhost:8200"]
+      test: ["CMD", "step", "ca", "health", "--ca-url=https://localhost:9000", "--root=/home/step/certs/root_ca.crt"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 15s
     networks:
       - torque-iot
-
-  vault-setup:
-    image: hashicorp/vault:latest
-    restart: on-failure
-    environment:
-      VAULT_ADDR: http://vault:8200
-      VAULT_TOKEN: torque
-    volumes:
-      - ./vault/setup.sh:/setup.sh:ro
-      - vault-ca:/vault-ca
-    command: sh /setup.sh
-    networks:
-      - torque-iot
-    depends_on:
-      vault:
-        condition: service_healthy
 
   emqx:
     image: emqx/emqx:5.8
@@ -86,14 +75,13 @@ services:
     volumes:
       - ./emqx/emqx.conf:/opt/emqx/etc/emqx.conf:ro
       - emqx-data:/opt/emqx/data
-      - vault-ca:/opt/emqx/etc/certs:ro
+      - ../certs/emqx:/opt/emqx/etc/certs:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - torque-iot
     depends_on:
-      vault-setup:
-        condition: service_completed_successfully
+      - step-ca
 
 networks:
   torque-iot:
@@ -103,4 +91,4 @@ volumes:
   postgres-data:
   rabbitmq-data:
   emqx-data:
-  vault-ca:
+  step-ca-data:
