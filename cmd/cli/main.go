@@ -38,7 +38,16 @@ func main() {
 		Short: "Publish a message to the broker",
 	}
 	publish.AddCommand(telemetryCmd(), dtcCmd(), sessionCmd())
-	root.AddCommand(publish)
+
+	tuiCmd := &cobra.Command{
+		Use:   "tui",
+		Short: "Interactive TUI for publishing messages",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTUI()
+		},
+	}
+
+	root.AddCommand(publish, tuiCmd)
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
