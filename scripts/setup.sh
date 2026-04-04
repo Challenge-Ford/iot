@@ -110,27 +110,38 @@ echo "  ✓ EMQX started"
 # ──────────────────────────────────────────────────────────────
 print_step "7/8  Issuing test device certificate"
 # ──────────────────────────────────────────────────────────────
-DEVICE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
-$COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$DEVICE_CERTS_DIR/ca.crt"
-issue_cert "$DEVICE_ID" "$DEVICE_CERTS_DIR/device.crt" "$DEVICE_CERTS_DIR/device.key"
-echo "  ✓ certificate issued for CN: $DEVICE_ID"
+EXISTING=$(psql_exec "SELECT id FROM device.devices WHERE name = 'test-device' AND deleted_at IS NULL LIMIT 1;" 2>/dev/null | grep -E '[0-9a-f-]{36}' | tr -d ' ' || echo "")
+
+if [ -n "$EXISTING" ]; then
+  DEVICE_ID="$EXISTING"
+  echo "  ✓ device already exists (CN: $DEVICE_ID), skipping cert issuance"
+else
+  DEVICE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+  $COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$DEVICE_CERTS_DIR/ca.crt"
+  issue_cert "$DEVICE_ID" "$DEVICE_CERTS_DIR/device.crt" "$DEVICE_CERTS_DIR/device.key"
+  echo "  ✓ certificate issued for CN: $DEVICE_ID"
+fi
 
 # ──────────────────────────────────────────────────────────────
 print_step "8/8  Seeding test device in Postgres"
 # ──────────────────────────────────────────────────────────────
-VEHICLE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
-VEHICLE_VIN="TEST00000000000001"
+if [ -n "$EXISTING" ]; then
+  VEHICLE_VIN=$(psql_exec "SELECT vehicle_vin FROM device.devices WHERE id = '$DEVICE_ID' LIMIT 1;" 2>/dev/null | grep -v "^$\|vehicle_vin\|---\|row" | tr -d ' ' || echo "TEST00000000000001")
+  echo "  ✓ device already seeded, skipping"
+else
+  VEHICLE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+  VEHICLE_VIN="TEST00000000000001"
 
-psql_exec "
-  INSERT INTO device.devices (id, name, certificate_cn, vehicle_id, vehicle_vin)
-  VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID', '$VEHICLE_VIN')
-  ON CONFLICT (certificate_cn) DO NOTHING;
-"
+  psql_exec "
+    INSERT INTO device.devices (id, name, certificate_cn, vehicle_id, vehicle_vin)
+    VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID', '$VEHICLE_VIN');
+  "
 
-printf '{\n  "device_id": "%s",\n  "vehicle_id": "%s",\n  "vin": "%s"\n}\n' \
-  "$DEVICE_ID" "$VEHICLE_ID" "$VEHICLE_VIN" > "$DEVICE_CERTS_DIR/meta.json"
+  printf '{\n  "device_id": "%s",\n  "vehicle_id": "%s",\n  "vin": "%s"\n}\n' \
+    "$DEVICE_ID" "$VEHICLE_ID" "$VEHICLE_VIN" > "$DEVICE_CERTS_DIR/meta.json"
 
-echo "  ✓ test device seeded"
+  echo "  ✓ test device seeded"
+fi
 
 echo ""
 echo "══════════════════════════════════════════════════"
@@ -146,7 +157,7 @@ echo "    Listener → $LISTENER_CERTS_DIR"
 echo "    Device   → $DEVICE_CERTS_DIR"
 echo ""
 echo "  Services:"
-echo "    step-ca  → https://localhost:9000"
+echo "    step-ca  → https://localhost:9001"
 echo "    emqx     → ssl://localhost:8884"
 echo "    rabbitmq → amqp://localhost:5673  (UI: :15673)"
 echo "    postgres → localhost:5434"
