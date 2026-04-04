@@ -17,13 +17,10 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 	"torque-iot/internal/core/logger"
-	"torque-iot/internal/core/pki"
 )
 
 const (
 	serviceClientID = "torque-listener"
-	serviceCN       = "torque-listener"
-	vaultPKIRole    = "service"
 
 	queueTelemetry = "torque.telemetry"
 	queueDTC       = "torque.dtc"
@@ -55,31 +52,13 @@ func main() {
 	}
 	defer log.Sync()
 
-	// --- Vault PKI ---
-	vaultPKI, err := pki.NewVaultPKI(mustEnv("VAULT_ADDR"), mustEnv("VAULT_TOKEN"), vaultPKIRole)
-	if err != nil {
-		log.Fatal("failed to init vault pki", zap.Error(err))
-	}
-
-	ctx := context.Background()
-
-	log.Info("issuing service certificate", zap.String("cn", serviceCN))
-	cert, err := vaultPKI.Issue(ctx, serviceCN)
-	if err != nil {
-		log.Fatal("failed to issue certificate", zap.Error(err))
-	}
-
-	caCertPEM, err := vaultPKI.FetchCACert(ctx)
-	if err != nil {
-		log.Fatal("failed to fetch ca cert", zap.Error(err))
-	}
-
-	mqttServerName := os.Getenv("MQTT_SERVER_NAME")
-	if mqttServerName == "" {
-		mqttServerName = "emqx"
-	}
-
-	tlsConfig, err := buildTLSConfig(caCertPEM, cert.Certificate, cert.PrivateKey, mqttServerName)
+	// --- TLS ---
+	tlsConfig, err := buildTLSConfig(
+		mustEnv("MQTT_CA_CERT"),
+		mustEnv("MQTT_CERT"),
+		mustEnv("MQTT_KEY"),
+		os.Getenv("MQTT_SERVER_NAME"),
+	)
 	if err != nil {
 		log.Fatal("failed to build tls config", zap.Error(err))
 	}
@@ -141,9 +120,6 @@ func main() {
 	client.Disconnect(500)
 }
 
-// makeHandler returns an MQTT message handler that unpacks the payload (single
-// object or array of objects), injects the VIN into each item, and publishes
-// them individually to the appropriate RabbitMQ queue.
 func makeHandler(log *zap.Logger, ch *amqp.Channel, suffix string) mqtt.MessageHandler {
 	queue := topicQueues[suffix]
 	return func(_ mqtt.Client, msg mqtt.Message) {
@@ -177,11 +153,14 @@ func makeHandler(log *zap.Logger, ch *amqp.Channel, suffix string) mqtt.MessageH
 			}
 		}
 
-		log.Debug("forwarded messages", zap.String("topic", msg.Topic()), zap.String("queue", queue), zap.Int("count", len(items)))
+		log.Debug("forwarded messages",
+			zap.String("topic", msg.Topic()),
+			zap.String("queue", queue),
+			zap.Int("count", len(items)),
+		)
 	}
 }
 
-// vinFromTopic extracts the VIN from topics like torque/vehicles/{vin}/{suffix}.
 func vinFromTopic(topic string) string {
 	parts := strings.Split(topic, "/")
 	if len(parts) != 4 {
@@ -190,16 +169,11 @@ func vinFromTopic(topic string) string {
 	return parts[2]
 }
 
-// unpackPayload accepts either a JSON object or a JSON array and always returns
-// a slice of map[string]any so callers can iterate uniformly.
 func unpackPayload(payload []byte) ([]map[string]any, error) {
-	// Try array first.
 	var arr []map[string]any
 	if err := json.Unmarshal(payload, &arr); err == nil {
 		return arr, nil
 	}
-
-	// Fall back to single object.
 	var obj map[string]any
 	if err := json.Unmarshal(payload, &obj); err != nil {
 		return nil, err
@@ -207,20 +181,27 @@ func unpackPayload(payload []byte) ([]map[string]any, error) {
 	return []map[string]any{obj}, nil
 }
 
-func buildTLSConfig(caCertPEM, certPEM, keyPEM, serverName string) (*tls.Config, error) {
+func buildTLSConfig(caCertPath, certPath, keyPath, serverName string) (*tls.Config, error) {
+	caPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil, fmt.Errorf("read ca cert: %w", err)
+	}
 	caPool := x509.NewCertPool()
-	if !caPool.AppendCertsFromPEM([]byte(caCertPEM)) {
+	if !caPool.AppendCertsFromPEM(caPEM) {
 		return nil, fmt.Errorf("failed to parse ca certificate")
 	}
 
-	clientCert, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
+	clientCert, err := tls.LoadX509KeyPair(certPath, keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse client certificate: %w", err)
+		return nil, fmt.Errorf("load client cert: %w", err)
 	}
 
-	return &tls.Config{
+	cfg := &tls.Config{
 		RootCAs:      caPool,
 		Certificates: []tls.Certificate{clientCert},
-		ServerName:   serverName,
-	}, nil
+	}
+	if serverName != "" {
+		cfg.ServerName = serverName
+	}
+	return cfg, nil
 }

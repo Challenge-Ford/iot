@@ -1,3 +1,2 @@
-.test-device.json
-mqtt-guard
-mqtt-listener
+certs/
+**/.env
