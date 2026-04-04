@@ -1,3 +1,4 @@
 certs/
 **/__debug_bin*
+cli
 **/.env
