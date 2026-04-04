@@ -53,6 +53,7 @@ func main() {
 	guard := handler.NewGuard(db, serviceCNs)
 
 	r := chi.NewRouter()
+	r.Use(middleware.ErrorLogger(log))
 	r.Use(middleware.SharedSecret(mustEnv("MQTT_GUARD_SECRET")))
 
 	r.Post("/mqtt/auth", guard.Auth)
