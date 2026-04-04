@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -92,9 +93,10 @@ func main() {
 	opts.SetAutoReconnect(true)
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		log.Info("connected to mqtt broker", zap.String("broker", brokerURL))
+		var mu sync.Mutex
 		for suffix := range topicQueues {
 			topic := "torque/vehicles/+/" + suffix
-			token := c.Subscribe(topic, 1, makeHandler(log, ch, suffix))
+			token := c.Subscribe(topic, 1, makeHandler(log, ch, &mu, suffix))
 			if token.Wait() && token.Error() != nil {
 				log.Error("failed to subscribe", zap.String("topic", topic), zap.Error(token.Error()))
 			} else {
@@ -120,7 +122,7 @@ func main() {
 	client.Disconnect(500)
 }
 
-func makeHandler(log *zap.Logger, ch *amqp.Channel, suffix string) mqtt.MessageHandler {
+func makeHandler(log *zap.Logger, ch *amqp.Channel, mu *sync.Mutex, suffix string) mqtt.MessageHandler {
 	queue := topicQueues[suffix]
 	return func(_ mqtt.Client, msg mqtt.Message) {
 		vin := vinFromTopic(msg.Topic())
@@ -143,12 +145,15 @@ func makeHandler(log *zap.Logger, ch *amqp.Channel, suffix string) mqtt.MessageH
 				continue
 			}
 
-			if err := ch.PublishWithContext(context.Background(), "", queue, false, false, amqp.Publishing{
+			mu.Lock()
+			err = ch.PublishWithContext(context.Background(), "", queue, false, false, amqp.Publishing{
 				ContentType:  "application/json",
 				DeliveryMode: amqp.Persistent,
 				Timestamp:    time.Now(),
 				Body:         body,
-			}); err != nil {
+			})
+			mu.Unlock()
+			if err != nil {
 				log.Error("failed to publish to rabbitmq", zap.String("queue", queue), zap.Error(err))
 			}
 		}
