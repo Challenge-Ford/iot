@@ -103,11 +103,12 @@ func (g *Guard) ACL(w http.ResponseWriter, r *http.Request) {
 
 	var vin string
 	err := g.db.QueryRowContext(r.Context(),
-		`SELECT vehicle_vin FROM device.devices
-		 WHERE certificate_cn = $1
-		   AND vehicle_id IS NOT NULL
-		   AND vehicle_vin IS NOT NULL
-		   AND deleted_at IS NULL`,
+		`SELECT v.vin
+		 FROM device.devices d
+		 JOIN vehicle.vehicles v ON v.id = d.vehicle_id AND v.deleted_at IS NULL
+		 WHERE d.certificate_cn = $1
+		   AND d.vehicle_id IS NOT NULL
+		   AND d.deleted_at IS NULL`,
 		identity).Scan(&vin)
 	if err != nil {
 		writeJSON(w, deny)

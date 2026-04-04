@@ -133,8 +133,12 @@ else
   VEHICLE_VIN="TEST00000000000001"
 
   psql_exec "
-    INSERT INTO device.devices (id, name, certificate_cn, vehicle_id, vehicle_vin)
-    VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID', '$VEHICLE_VIN')
+    INSERT INTO vehicle.vehicles (id, vin)
+    VALUES ('$VEHICLE_ID', '$VEHICLE_VIN')
+    ON CONFLICT (vin) DO NOTHING;
+
+    INSERT INTO device.devices (id, name, certificate_cn, vehicle_id)
+    VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID')
     ON CONFLICT (certificate_cn) DO NOTHING;
   "
 
