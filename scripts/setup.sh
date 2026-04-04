@@ -110,10 +110,11 @@ echo "  ✓ EMQX started"
 # ──────────────────────────────────────────────────────────────
 print_step "7/8  Issuing test device certificate"
 # ──────────────────────────────────────────────────────────────
-EXISTING=$(psql_exec "SELECT id FROM device.devices WHERE name = 'test-device' AND deleted_at IS NULL LIMIT 1;" 2>/dev/null | grep -E '[0-9a-f-]{36}' | tr -d ' ' || echo "")
+META="$DEVICE_CERTS_DIR/meta.json"
 
-if [ -n "$EXISTING" ]; then
-  DEVICE_ID="$EXISTING"
+if [ -f "$META" ]; then
+  DEVICE_ID=$(grep -o '"device_id": *"[^"]*"' "$META" | cut -d'"' -f4)
+  VEHICLE_VIN=$(grep -o '"vin": *"[^"]*"' "$META" | cut -d'"' -f4)
   echo "  ✓ device already exists (CN: $DEVICE_ID), skipping cert issuance"
 else
   DEVICE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
@@ -125,8 +126,7 @@ fi
 # ──────────────────────────────────────────────────────────────
 print_step "8/8  Seeding test device in Postgres"
 # ──────────────────────────────────────────────────────────────
-if [ -n "$EXISTING" ]; then
-  VEHICLE_VIN=$(psql_exec "SELECT vehicle_vin FROM device.devices WHERE id = '$DEVICE_ID' LIMIT 1;" 2>/dev/null | grep -v "^$\|vehicle_vin\|---\|row" | tr -d ' ' || echo "TEST00000000000001")
+if [ -f "$META" ]; then
   echo "  ✓ device already seeded, skipping"
 else
   VEHICLE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
@@ -134,11 +134,12 @@ else
 
   psql_exec "
     INSERT INTO device.devices (id, name, certificate_cn, vehicle_id, vehicle_vin)
-    VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID', '$VEHICLE_VIN');
+    VALUES ('$DEVICE_ID', 'test-device', '$DEVICE_ID', '$VEHICLE_ID', '$VEHICLE_VIN')
+    ON CONFLICT (certificate_cn) DO NOTHING;
   "
 
   printf '{\n  "device_id": "%s",\n  "vehicle_id": "%s",\n  "vin": "%s"\n}\n' \
-    "$DEVICE_ID" "$VEHICLE_ID" "$VEHICLE_VIN" > "$DEVICE_CERTS_DIR/meta.json"
+    "$DEVICE_ID" "$VEHICLE_ID" "$VEHICLE_VIN" > "$META"
 
   echo "  ✓ test device seeded"
 fi
