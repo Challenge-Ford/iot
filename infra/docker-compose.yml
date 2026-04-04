@@ -43,7 +43,7 @@ services:
     restart: unless-stopped
     environment:
       DOCKER_STEPCA_INIT_NAME: "Torque IoT CA"
-      DOCKER_STEPCA_INIT_DNS: "step-ca,localhost"
+      DOCKER_STEPCA_INIT_DNS_NAMES: "step-ca,localhost"
       DOCKER_STEPCA_INIT_ADDRESS: ":9000"
       DOCKER_STEPCA_INIT_PROVISIONER_NAME: "torque"
       DOCKER_STEPCA_INIT_PASSWORD_FILE: /run/secrets/ca-password

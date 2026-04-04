@@ -7,11 +7,12 @@
 # Bootstraps the full local environment in order:
 #   1. Start step-ca, postgres and rabbitmq
 #   2. Wait for step-ca to become healthy
-#   3. Generate EMQX TLS certificates
-#   4. Issue mqtt-listener service certificate
-#   5. Start EMQX
-#   6. Issue a test device certificate
-#   7. Seed the test device in Postgres
+#   3. Configure step-ca certificate duration limits
+#   4. Generate EMQX TLS certificates
+#   5. Issue mqtt-listener service certificate
+#   6. Start EMQX
+#   7. Issue a test device certificate
+#   8. Seed the test device in Postgres
 #
 # Idempotent — safe to run multiple times.
 # Requires: docker, docker compose
@@ -22,6 +23,8 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 EMQX_CERTS_DIR="$REPO_DIR/certs/emqx"
 LISTENER_CERTS_DIR="$REPO_DIR/certs/listener"
 DEVICE_CERTS_DIR="$REPO_DIR/certs/device"
+
+mkdir -p "$EMQX_CERTS_DIR" "$LISTENER_CERTS_DIR" "$DEVICE_CERTS_DIR"
 
 step_exec() { $COMPOSE exec -T step-ca "$@"; }
 psql_exec() { $COMPOSE exec -T postgres psql -U torque -d torque -c "$1"; }
@@ -34,9 +37,7 @@ issue_cert() {
     step ca certificate '$CN' /tmp/out.crt /tmp/out.key \
       --provisioner=torque \
       --provisioner-password-file=/run/secrets/ca-password \
-      --not-after=8760h \
-      --no-password --insecure \
-      --force > /dev/null 2>&1
+      --not-after=8760h -f > /dev/null 2>&1
   "
   $COMPOSE cp step-ca:/tmp/out.crt "$OUT_CRT"
   $COMPOSE cp step-ca:/tmp/out.key "$OUT_KEY"
@@ -67,37 +68,54 @@ done
 echo "  ✓ step-ca is healthy"
 
 # ──────────────────────────────────────────────────────────────
-print_step "3/7  Generating EMQX TLS certificates"
+print_step "3/8  Configuring step-ca certificate duration limits"
 # ──────────────────────────────────────────────────────────────
-mkdir -p "$EMQX_CERTS_DIR"
+step_exec sh -c "
+  jq '.authority.claims = {
+    \"minTLSCertDuration\": \"5m\",
+    \"maxTLSCertDuration\": \"8760h\",
+    \"defaultTLSCertDuration\": \"8760h\"
+  }' /home/step/config/ca.json > /tmp/ca.json.tmp &&
+  mv /tmp/ca.json.tmp /home/step/config/ca.json
+"
+$COMPOSE restart step-ca
+until step_exec step ca health \
+  --ca-url=https://localhost:9000 \
+  --root=/home/step/certs/root_ca.crt > /dev/null 2>&1; do
+  printf "  waiting...\r"
+  sleep 2
+done
+echo "  ✓ certificate duration configured (max: 8760h)"
+
+# ──────────────────────────────────────────────────────────────
+print_step "4/8  Generating EMQX TLS certificates"
+# ──────────────────────────────────────────────────────────────
 $COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$EMQX_CERTS_DIR/ca.crt"
 issue_cert "emqx" "$EMQX_CERTS_DIR/server.crt" "$EMQX_CERTS_DIR/server.key"
 echo "  ✓ certificates written to $EMQX_CERTS_DIR"
 
 # ──────────────────────────────────────────────────────────────
-print_step "4/7  Issuing mqtt-listener service certificate"
+print_step "5/8  Issuing mqtt-listener service certificate"
 # ──────────────────────────────────────────────────────────────
-mkdir -p "$LISTENER_CERTS_DIR"
 $COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$LISTENER_CERTS_DIR/ca.crt"
 issue_cert "torque-listener" "$LISTENER_CERTS_DIR/listener.crt" "$LISTENER_CERTS_DIR/listener.key"
 echo "  ✓ certificates written to $LISTENER_CERTS_DIR"
 
 # ──────────────────────────────────────────────────────────────
-print_step "5/7  Starting EMQX"
+print_step "6/8  Starting EMQX"
 # ──────────────────────────────────────────────────────────────
 $COMPOSE up -d emqx
 echo "  ✓ EMQX started"
 
 # ──────────────────────────────────────────────────────────────
-print_step "6/7  Issuing test device certificate"
+print_step "7/8  Issuing test device certificate"
 # ──────────────────────────────────────────────────────────────
 DEVICE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
-mkdir -p "$DEVICE_CERTS_DIR"
 issue_cert "$DEVICE_ID" "$DEVICE_CERTS_DIR/device.crt" "$DEVICE_CERTS_DIR/device.key"
 echo "  ✓ certificate issued for CN: $DEVICE_ID"
 
 # ──────────────────────────────────────────────────────────────
-print_step "7/7  Seeding test device in Postgres"
+print_step "8/8  Seeding test device in Postgres"
 # ──────────────────────────────────────────────────────────────
 VEHICLE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
 VEHICLE_VIN="TEST00000000000001"
