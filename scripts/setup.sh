@@ -111,6 +111,7 @@ echo "  ✓ EMQX started"
 print_step "7/8  Issuing test device certificate"
 # ──────────────────────────────────────────────────────────────
 DEVICE_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr '[:upper:]' '[:lower:]')
+$COMPOSE cp step-ca:/home/step/certs/root_ca.crt "$DEVICE_CERTS_DIR/ca.crt"
 issue_cert "$DEVICE_ID" "$DEVICE_CERTS_DIR/device.crt" "$DEVICE_CERTS_DIR/device.key"
 echo "  ✓ certificate issued for CN: $DEVICE_ID"
 

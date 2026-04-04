@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "mqtt-listener",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/mqtt-listener",
+      "env": {
+        "LOG_JSON": "false",
+        "MQTT_BROKER_URL": "ssl://localhost:8884",
+        "MQTT_CA_CERT": "${workspaceFolder}/certs/listener/ca.crt",
+        "MQTT_CERT": "${workspaceFolder}/certs/listener/listener.crt",
+        "MQTT_KEY": "${workspaceFolder}/certs/listener/listener.key",
+        "MQTT_SERVER_NAME": "emqx",
+        "RABBITMQ_URL": "amqp://torque:torque@localhost:5673/"
+      }
+    },
+    {
+      "name": "mqtt-guard",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/mqtt-guard",
+      "env": {
+        "LOG_JSON": "false",
+        "PORT": "8081",
+        "DATABASE_URL": "postgres://torque:torque@localhost:5434/torque?sslmode=disable",
+        "MQTT_GUARD_SECRET": "changeme",
+        "MQTT_SERVICE_CNS": "torque-listener"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "guard + listener",
+      "configurations": ["mqtt-guard", "mqtt-listener"]
+    }
+  ]
+}
