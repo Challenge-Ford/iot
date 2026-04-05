@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/spf13/cobra"
@@ -161,6 +162,8 @@ func publishMsg(topic string, payload map[string]any) error {
 		return fmt.Errorf("connect: %w", token.Error())
 	}
 	defer client.Disconnect(250)
+
+	payload["time"] = time.Now().UTC().Format(time.RFC3339Nano)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
