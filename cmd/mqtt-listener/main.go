@@ -25,13 +25,11 @@ const (
 
 	queueTelemetry = "torque.telemetry"
 	queueDTC       = "torque.dtc"
-	queueSession   = "torque.session"
 )
 
 var topicQueues = map[string]string{
 	"telemetry": queueTelemetry,
 	"dtc":       queueDTC,
-	"session":   queueSession,
 }
 
 func mustEnv(key string) string {
@@ -77,7 +75,7 @@ func main() {
 	}
 	defer ch.Close()
 
-	for _, queue := range []string{queueTelemetry, queueDTC, queueSession} {
+	for _, queue := range []string{queueTelemetry, queueDTC} {
 		if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
 			log.Fatal("failed to declare queue", zap.String("queue", queue), zap.Error(err))
 		}

@@ -23,7 +23,6 @@ func runTUI() error {
 				Options(
 					huh.NewOption("Telemetry", "telemetry"),
 					huh.NewOption("DTC", "dtc"),
-					huh.NewOption("Session", "session"),
 				).
 				Value(&msgType),
 		),
@@ -37,8 +36,6 @@ func runTUI() error {
 		return tuiTelemetry()
 	case "dtc":
 		return tuiDTC()
-	case "session":
-		return tuiSession()
 	}
 	return nil
 }
@@ -183,26 +180,6 @@ func tuiDTC() error {
 	return publishMsg("dtc", map[string]any{"code": code, "status": status})
 }
 
-func tuiSession() error {
-	var event string
-
-	err := huh.NewForm(
-		huh.NewGroup(
-			huh.NewSelect[string]().
-				Title("Session event").
-				Options(
-					huh.NewOption("Start", "start"),
-					huh.NewOption("End", "end"),
-				).
-				Value(&event),
-		),
-	).Run()
-	if err != nil {
-		return err
-	}
-
-	return publishMsg("session", map[string]any{"event": event})
-}
 
 func parseFloat(m map[string]any, key, val string) {
 	if val == "" {

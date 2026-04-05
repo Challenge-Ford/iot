@@ -37,7 +37,7 @@ func main() {
 		Use:   "publish",
 		Short: "Publish a message to the broker",
 	}
-	publish.AddCommand(telemetryCmd(), dtcCmd(), sessionCmd())
+	publish.AddCommand(telemetryCmd(), dtcCmd())
 
 	tuiCmd := &cobra.Command{
 		Use:   "tui",
@@ -138,24 +138,6 @@ func dtcCmd() *cobra.Command {
 	return cmd
 }
 
-func sessionCmd() *cobra.Command {
-	var event string
-
-	cmd := &cobra.Command{
-		Use:   "session",
-		Short: "Publish a session event",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if event != "start" && event != "end" {
-				return fmt.Errorf("--event must be 'start' or 'end'")
-			}
-			return publishMsg("session", map[string]any{"event": event})
-		},
-	}
-
-	cmd.Flags().StringVar(&event, "event", "", "Session event: start or end")
-
-	return cmd
-}
 
 func publishMsg(topic string, payload map[string]any) error {
 	v, err := resolveVIN()
