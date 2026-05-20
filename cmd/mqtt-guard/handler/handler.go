@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 type result struct {
@@ -16,28 +18,27 @@ var allow = result{"allow"}
 var deny = result{"deny"}
 
 type authInput struct {
-	ClientID string `json:"clientid"`
-	CN       string `json:"cn"`
+	CN string `json:"cn"`
 }
 
 type aclInput struct {
-	ClientID string `json:"clientid"`
-	CN       string `json:"cn"`
-	Topic    string `json:"topic"`
-	Action   string `json:"action"`
+	CN     string `json:"cn"`
+	Topic  string `json:"topic"`
+	Action string `json:"action"`
 }
 
 type Guard struct {
 	db         *sql.DB
+	log        *zap.Logger
 	serviceCNs map[string]struct{}
 }
 
-func NewGuard(db *sql.DB, serviceCNs []string) *Guard {
+func NewGuard(db *sql.DB, log *zap.Logger, serviceCNs []string) *Guard {
 	m := make(map[string]struct{}, len(serviceCNs))
 	for _, cn := range serviceCNs {
 		m[cn] = struct{}{}
 	}
-	return &Guard{db: db, serviceCNs: m}
+	return &Guard{db: db, log: log, serviceCNs: m}
 }
 
 func (g *Guard) Auth(w http.ResponseWriter, r *http.Request) {
@@ -47,13 +48,14 @@ func (g *Guard) Auth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	identity := identity(input.CN, input.ClientID)
+	identity := input.CN
 	if identity == "" {
 		writeJSON(w, deny)
 		return
 	}
 
 	if _, ok := g.serviceCNs[identity]; ok {
+		g.log.Info("auth allow (service)", zap.String("cn", identity))
 		writeJSON(w, allow)
 		return
 	}
@@ -67,10 +69,12 @@ func (g *Guard) Auth(w http.ResponseWriter, r *http.Request) {
 			  AND deleted_at IS NULL
 		)`, identity).Scan(&exists)
 	if err != nil || !exists {
+		g.log.Warn("auth deny", zap.String("cn", identity))
 		writeJSON(w, deny)
 		return
 	}
 
+	g.log.Info("auth allow (device)", zap.String("cn", identity))
 	writeJSON(w, allow)
 }
 
@@ -81,7 +85,7 @@ func (g *Guard) ACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	identity := identity(input.CN, input.ClientID)
+	identity := input.CN
 	if identity == "" || input.Topic == "" {
 		writeJSON(w, deny)
 		return
@@ -89,14 +93,17 @@ func (g *Guard) ACL(w http.ResponseWriter, r *http.Request) {
 
 	if _, ok := g.serviceCNs[identity]; ok {
 		if input.Action == "subscribe" && isServiceTopic(input.Topic) {
+			g.log.Info("acl allow (service)", zap.String("cn", identity), zap.String("topic", input.Topic), zap.String("action", input.Action))
 			writeJSON(w, allow)
 			return
 		}
+		g.log.Info("acl deny (service)", zap.String("cn", identity), zap.String("topic", input.Topic), zap.String("action", input.Action))
 		writeJSON(w, deny)
 		return
 	}
 
 	if input.Action != "publish" {
+		g.log.Info("acl deny (device not publish)", zap.String("cn", identity), zap.String("topic", input.Topic), zap.String("action", input.Action))
 		writeJSON(w, deny)
 		return
 	}
@@ -111,25 +118,21 @@ func (g *Guard) ACL(w http.ResponseWriter, r *http.Request) {
 		   AND d.deleted_at IS NULL`,
 		identity).Scan(&vin)
 	if err != nil {
+		g.log.Info("acl deny (device not found)", zap.String("cn", identity), zap.String("topic", input.Topic))
 		writeJSON(w, deny)
 		return
 	}
 
 	for _, suffix := range []string{"telemetry", "dtc", "session"} {
 		if input.Topic == fmt.Sprintf("torque/vehicles/%s/%s", vin, suffix) {
+			g.log.Info("acl allow (device)", zap.String("cn", identity), zap.String("topic", input.Topic))
 			writeJSON(w, allow)
 			return
 		}
 	}
 
+	g.log.Info("acl deny (device wrong topic)", zap.String("cn", identity), zap.String("topic", input.Topic))
 	writeJSON(w, deny)
-}
-
-func identity(cn, clientID string) string {
-	if cn != "" {
-		return cn
-	}
-	return clientID
 }
 
 func isServiceTopic(topic string) bool {

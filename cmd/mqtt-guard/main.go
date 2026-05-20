@@ -8,11 +8,12 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 	"torque-iot/cmd/mqtt-guard/handler"
-	"torque-iot/cmd/mqtt-guard/middleware"
+	guardmw "torque-iot/cmd/mqtt-guard/middleware"
 	"torque-iot/internal/core/logger"
 )
 
@@ -50,11 +51,12 @@ func main() {
 		serviceCNs = strings.Split(raw, ",")
 	}
 
-	guard := handler.NewGuard(db, serviceCNs)
+	guard := handler.NewGuard(db, log, serviceCNs)
 
 	r := chi.NewRouter()
-	r.Use(middleware.ErrorLogger(log))
-	r.Use(middleware.SharedSecret(mustEnv("MQTT_GUARD_SECRET")))
+	r.Use(middleware.Recoverer)
+	r.Use(guardmw.ErrorLogger(log))
+	r.Use(guardmw.SharedSecret(mustEnv("MQTT_GUARD_SECRET")))
 
 	r.Post("/mqtt/auth", guard.Auth)
 	r.Post("/mqtt/acl", guard.ACL)

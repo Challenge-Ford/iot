@@ -9,11 +9,11 @@
       "program": "${workspaceFolder}/cmd/mqtt-listener",
       "env": {
         "LOG_JSON": "false",
-        "MQTT_BROKER_URL": "ssl://localhost:8884",
+        "MQTT_BROKER_URL": "ssl://localhost:8883",
         "MQTT_CA_CERT": "${workspaceFolder}/certs/listener/ca.crt",
         "MQTT_CERT": "${workspaceFolder}/certs/listener/listener.crt",
         "MQTT_KEY": "${workspaceFolder}/certs/listener/listener.key",
-        "MQTT_SERVER_NAME": "emqx",
+        "MQTT_SERVER_NAME": "0.tcp.sa.ngrok.io",
         "RABBITMQ_URL": "amqp://torque:torque@localhost:5673/"
       }
     },
