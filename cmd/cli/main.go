@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -18,7 +19,7 @@ var (
 	caFile     string
 	certFile   string
 	keyFile    string
-	vin        string
+	vehicleID  string
 )
 
 func main() {
@@ -27,18 +28,18 @@ func main() {
 		Short: "Torque device simulator",
 	}
 
-	root.PersistentFlags().StringVar(&broker, "broker", "ssl://localhost:8884", "MQTT broker URL")
+	root.PersistentFlags().StringVar(&broker, "broker", "ssl://localhost:8883", "MQTT broker URL")
 	root.PersistentFlags().StringVar(&serverName, "server-name", "emqx", "TLS server name")
 	root.PersistentFlags().StringVar(&caFile, "ca-cert", "certs/device/ca.crt", "CA certificate path")
 	root.PersistentFlags().StringVar(&certFile, "cert", "certs/device/device.crt", "Client certificate path")
 	root.PersistentFlags().StringVar(&keyFile, "key", "certs/device/device.key", "Client private key path")
-	root.PersistentFlags().StringVar(&vin, "vin", "", "Vehicle VIN (default: read from certs/device/meta.json)")
+	root.PersistentFlags().StringVar(&vehicleID, "vehicle-id", "", "Vehicle UUID (default: read from certs/device/meta.json)")
 
 	publish := &cobra.Command{
 		Use:   "publish",
 		Short: "Publish a message to the broker",
 	}
-	publish.AddCommand(telemetryCmd(), dtcCmd())
+	publish.AddCommand(stateCmd())
 
 	tuiCmd := &cobra.Command{
 		Use:   "tui",
@@ -55,40 +56,68 @@ func main() {
 	}
 }
 
-func telemetryCmd() *cobra.Command {
+func stateCmd() *cobra.Command {
 	var (
-		lat, lng, alt, gpsSpeed, heading, hdop                    float64
-		coolantTemp, intakeTemp, engineLoad, throttlePos           float64
+		lat, lng, alt, gpsSpeed, heading, hdop                      float64
+		coolantTemp, intakeTemp, engineLoad, throttlePos            float64
 		fuelLevel, fuelTrimShort, fuelTrimLong, maf, batteryVoltage float64
-		rpm, speed                                                 int
+		rpm, speed                                                  int
+		dtcs                                                        string
+		noDtcs                                                      bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "telemetry",
-		Short: "Publish telemetry data",
+		Use:   "state",
+		Short: "Publish a vehicle state snapshot",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			payload := map[string]any{}
-			setFloat(cmd, payload, "lat", lat)
-			setFloat(cmd, payload, "lng", lng)
-			setFloat(cmd, payload, "alt", alt)
-			setFloat(cmd, payload, "gps_speed", gpsSpeed)
-			setFloat(cmd, payload, "heading", heading)
-			setFloat(cmd, payload, "hdop", hdop)
-			setInt(cmd, payload, "rpm", rpm)
-			setInt(cmd, payload, "speed", speed)
-			setFloat(cmd, payload, "coolant_temp", coolantTemp)
-			setFloat(cmd, payload, "intake_temp", intakeTemp)
-			setFloat(cmd, payload, "engine_load", engineLoad)
-			setFloat(cmd, payload, "throttle_pos", throttlePos)
-			setFloat(cmd, payload, "fuel_level", fuelLevel)
-			setFloat(cmd, payload, "fuel_trim_short", fuelTrimShort)
-			setFloat(cmd, payload, "fuel_trim_long", fuelTrimLong)
-			setFloat(cmd, payload, "maf", maf)
-			setFloat(cmd, payload, "battery_voltage", batteryVoltage)
-			if len(payload) == 0 {
-				return fmt.Errorf("at least one field must be provided")
+			state := map[string]any{}
+			position := map[string]any{}
+			powertrain := map[string]any{}
+			fuel := map[string]any{}
+			electrical := map[string]any{}
+
+			setFloat(cmd, position, "lat", lat)
+			setFloat(cmd, position, "lng", lng)
+			setFloat(cmd, position, "alt", alt)
+			setFloat(cmd, position, "gps_speed", gpsSpeed)
+			setFloat(cmd, position, "heading", heading)
+			setFloat(cmd, position, "hdop", hdop)
+			setBlock(state, "position", position)
+
+			setInt(cmd, powertrain, "rpm", rpm)
+			setInt(cmd, powertrain, "speed", speed)
+			setFloat(cmd, powertrain, "coolant_temp", coolantTemp)
+			setFloat(cmd, powertrain, "intake_temp", intakeTemp)
+			setFloat(cmd, powertrain, "engine_load", engineLoad)
+			setFloat(cmd, powertrain, "throttle_pos", throttlePos)
+			setFloat(cmd, powertrain, "maf", maf)
+			setBlock(state, "powertrain", powertrain)
+
+			setFloat(cmd, fuel, "fuel_level", fuelLevel)
+			setFloat(cmd, fuel, "fuel_trim_short", fuelTrimShort)
+			setFloat(cmd, fuel, "fuel_trim_long", fuelTrimLong)
+			setBlock(state, "fuel", fuel)
+
+			setFloat(cmd, electrical, "battery_voltage", batteryVoltage)
+			setBlock(state, "electrical", electrical)
+
+			if cmd.Flags().Changed("dtcs") || noDtcs {
+				openDTCs := splitCSV(dtcs)
+				if noDtcs {
+					openDTCs = []string{}
+				}
+				state["diagnostics"] = map[string]any{"open_dtcs": openDTCs}
 			}
-			return publishMsg("telemetry", payload)
+
+			if len(state) == 0 {
+				return fmt.Errorf("at least one state field must be provided")
+			}
+
+			return publishState(map[string]any{
+				"observed_at": time.Now().UTC().Format(time.RFC3339Nano),
+				"state":       state,
+				"observation": map[string]any{"errors": []string{}},
+			})
 		},
 	}
 
@@ -100,8 +129,8 @@ func telemetryCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&hdop, "hdop", 0, "HDOP")
 	cmd.Flags().IntVar(&rpm, "rpm", 0, "Engine RPM")
 	cmd.Flags().IntVar(&speed, "speed", 0, "OBD speed (km/h)")
-	cmd.Flags().Float64Var(&coolantTemp, "coolant-temp", 0, "Coolant temperature (°C)")
-	cmd.Flags().Float64Var(&intakeTemp, "intake-temp", 0, "Intake air temperature (°C)")
+	cmd.Flags().Float64Var(&coolantTemp, "coolant-temp", 0, "Coolant temperature (C)")
+	cmd.Flags().Float64Var(&intakeTemp, "intake-temp", 0, "Intake air temperature (C)")
 	cmd.Flags().Float64Var(&engineLoad, "engine-load", 0, "Engine load (%)")
 	cmd.Flags().Float64Var(&throttlePos, "throttle-pos", 0, "Throttle position (%)")
 	cmd.Flags().Float64Var(&fuelLevel, "fuel-level", 0, "Fuel level (%)")
@@ -109,39 +138,14 @@ func telemetryCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&fuelTrimLong, "fuel-trim-long", 0, "Long-term fuel trim (%)")
 	cmd.Flags().Float64Var(&maf, "maf", 0, "Mass air flow (g/s)")
 	cmd.Flags().Float64Var(&batteryVoltage, "battery-voltage", 0, "Battery voltage (V)")
+	cmd.Flags().StringVar(&dtcs, "dtcs", "", "Comma-separated open DTC codes")
+	cmd.Flags().BoolVar(&noDtcs, "no-dtcs", false, "Send diagnostics as observed with no open DTCs")
 
 	return cmd
 }
 
-func dtcCmd() *cobra.Command {
-	var code, status string
-
-	cmd := &cobra.Command{
-		Use:   "dtc",
-		Short: "Publish a DTC event",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if code == "" {
-				return fmt.Errorf("--code is required")
-			}
-			if status != "opened" && status != "closed" {
-				return fmt.Errorf("--status must be 'opened' or 'closed'")
-			}
-			return publishMsg("dtc", map[string]any{
-				"code":   code,
-				"status": status,
-			})
-		},
-	}
-
-	cmd.Flags().StringVar(&code, "code", "", "DTC code (e.g. P0300)")
-	cmd.Flags().StringVar(&status, "status", "", "Event status: opened or closed")
-
-	return cmd
-}
-
-
-func publishMsg(topic string, payload map[string]any) error {
-	v, err := resolveVIN()
+func publishState(payload map[string]any) error {
+	id, err := resolveVehicleID()
 	if err != nil {
 		return err
 	}
@@ -163,41 +167,39 @@ func publishMsg(topic string, payload map[string]any) error {
 	}
 	defer client.Disconnect(250)
 
-	payload["time"] = time.Now().UTC().Format(time.RFC3339Nano)
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	fullTopic := fmt.Sprintf("torque/vehicles/%s/%s", v, topic)
-	token = client.Publish(fullTopic, 1, false, body)
+	topic := fmt.Sprintf("torque/vehicles/%s/state", id)
+	token = client.Publish(topic, 1, false, body)
 	if token.Wait() && token.Error() != nil {
 		return fmt.Errorf("publish: %w", token.Error())
 	}
 
-	fmt.Printf("published to %s: %s\n", fullTopic, body)
+	fmt.Printf("published to %s: %s\n", topic, body)
 	return nil
 }
 
-func resolveVIN() (string, error) {
-	if vin != "" {
-		return vin, nil
+func resolveVehicleID() (string, error) {
+	if vehicleID != "" {
+		return vehicleID, nil
 	}
 	data, err := os.ReadFile("certs/device/meta.json")
 	if err != nil {
-		return "", fmt.Errorf("could not read certs/device/meta.json (use --vin to specify): %w", err)
+		return "", fmt.Errorf("could not read certs/device/meta.json (use --vehicle-id to specify): %w", err)
 	}
 	var meta struct {
-		VIN string `json:"vin"`
+		VehicleID string `json:"vehicle_id"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return "", err
 	}
-	if meta.VIN == "" {
-		return "", fmt.Errorf("vin not found in meta.json")
+	if meta.VehicleID == "" {
+		return "", fmt.Errorf("vehicle_id not found in meta.json")
 	}
-	return meta.VIN, nil
+	return meta.VehicleID, nil
 }
 
 func buildTLSConfig() (*tls.Config, error) {
@@ -233,4 +235,25 @@ func setInt(cmd *cobra.Command, m map[string]any, name string, val int) {
 	if cmd.Flags().Changed(name) {
 		m[name] = val
 	}
+}
+
+func setBlock(state map[string]any, name string, block map[string]any) {
+	if len(block) > 0 {
+		state[name] = block
+	}
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return []string{}
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		code := strings.TrimSpace(part)
+		if code != "" {
+			out = append(out, code)
+		}
+	}
+	return out
 }

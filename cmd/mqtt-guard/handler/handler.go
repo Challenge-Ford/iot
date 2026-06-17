@@ -3,7 +3,6 @@ package handler
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -108,43 +107,48 @@ func (g *Guard) ACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var vin string
+	vehicleID := vehicleIDFromStateTopic(input.Topic)
+	if vehicleID == "" {
+		g.log.Info("acl deny (device wrong topic)", zap.String("cn", identity), zap.String("topic", input.Topic))
+		writeJSON(w, deny)
+		return
+	}
+
+	var allowed bool
 	err := g.db.QueryRowContext(r.Context(),
-		`SELECT v.vin
+		`SELECT EXISTS(
+		 SELECT 1
 		 FROM device.devices d
-		 JOIN vehicle.vehicles v ON v.id = d.vehicle_id AND v.deleted_at IS NULL
+		 JOIN vehicle.vehicles v ON v.id = d.vehicle_id
 		 WHERE d.certificate_cn = $1
-		   AND d.vehicle_id IS NOT NULL
-		   AND d.deleted_at IS NULL`,
-		identity).Scan(&vin)
-	if err != nil {
+		   AND d.vehicle_id = $2
+		   AND d.deleted_at IS NULL
+		   AND v.deleted_at IS NULL
+		)`,
+		identity, vehicleID).Scan(&allowed)
+	if err != nil || !allowed {
 		g.log.Info("acl deny (device not found)", zap.String("cn", identity), zap.String("topic", input.Topic))
 		writeJSON(w, deny)
 		return
 	}
 
-	for _, suffix := range []string{"telemetry", "dtc", "session"} {
-		if input.Topic == fmt.Sprintf("torque/vehicles/%s/%s", vin, suffix) {
-			g.log.Info("acl allow (device)", zap.String("cn", identity), zap.String("topic", input.Topic))
-			writeJSON(w, allow)
-			return
-		}
-	}
-
-	g.log.Info("acl deny (device wrong topic)", zap.String("cn", identity), zap.String("topic", input.Topic))
-	writeJSON(w, deny)
+	g.log.Info("acl allow (device)", zap.String("cn", identity), zap.String("topic", input.Topic))
+	writeJSON(w, allow)
 }
 
 func isServiceTopic(topic string) bool {
-	for _, suffix := range []string{"telemetry", "dtc", "session"} {
-		if topic == "torque/vehicles/+/"+suffix {
-			return true
-		}
-		if strings.HasPrefix(topic, "torque/vehicles/") && strings.HasSuffix(topic, "/"+suffix) {
-			return true
-		}
+	if topic == "torque/vehicles/+/state" {
+		return true
 	}
-	return false
+	return vehicleIDFromStateTopic(topic) != ""
+}
+
+func vehicleIDFromStateTopic(topic string) string {
+	parts := strings.Split(topic, "/")
+	if len(parts) != 4 || parts[0] != "torque" || parts[1] != "vehicles" || parts[3] != "state" {
+		return ""
+	}
+	return parts[2]
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -10,11 +10,12 @@
       "env": {
         "LOG_JSON": "false",
         "MQTT_BROKER_URL": "ssl://localhost:8883",
-        "MQTT_CA_CERT": "${workspaceFolder}/../backend-local-infra/certs/listener/ca.crt",
-        "MQTT_CERT": "${workspaceFolder}/../backend-local-infra/certs/listener/listener.crt",
-        "MQTT_KEY": "${workspaceFolder}/../backend-local-infra/certs/listener/listener.key",
+        "MQTT_CA_CERT": "${workspaceFolder}/../backend-local-infra/certs/ca/ca_bundle.crt",
+        "MQTT_CERT": "${workspaceFolder}/../backend-local-infra/certs/listener/client.crt",
+        "MQTT_KEY": "${workspaceFolder}/../backend-local-infra/certs/listener/client.key",
         "MQTT_SERVER_NAME": "localhost",
-        "RABBITMQ_URL": "amqp://torque:torque@localhost:5672/"
+        "RABBITMQ_URL": "amqp://torque:torque@localhost:5672/",
+        "DATABASE_URL": "postgres://torque:torque@localhost:5432/torque?sslmode=disable"
       }
     },
     {

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +17,7 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.uber.org/zap"
 	"torque-iot/internal/core/logger"
@@ -23,13 +26,14 @@ import (
 const (
 	serviceClientID = "torque-listener"
 
-	queueTelemetry = "torque.telemetry"
-	queueDTC       = "torque.dtc"
+	queueVehicleStateObserved = "torque.vehicle.state.observed"
+	stateTopic                = "torque/vehicles/+/state"
 )
 
-var topicQueues = map[string]string{
-	"telemetry": queueTelemetry,
-	"dtc":       queueDTC,
+type mqttStateSnapshot struct {
+	ObservedAt  *time.Time     `json:"observed_at"`
+	State       map[string]any `json:"state"`
+	Observation map[string]any `json:"observation"`
 }
 
 func mustEnv(key string) string {
@@ -51,7 +55,15 @@ func main() {
 	}
 	defer log.Sync()
 
-	// --- TLS ---
+	db, err := sql.Open("postgres", mustEnv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal("failed to open database", zap.Error(err))
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		log.Fatal("failed to connect to database", zap.Error(err))
+	}
+
 	tlsConfig, err := buildTLSConfig(
 		mustEnv("MQTT_CA_CERT"),
 		mustEnv("MQTT_CERT"),
@@ -62,7 +74,6 @@ func main() {
 		log.Fatal("failed to build tls config", zap.Error(err))
 	}
 
-	// --- RabbitMQ ---
 	amqpConn, err := amqp.Dial(mustEnv("RABBITMQ_URL"))
 	if err != nil {
 		log.Fatal("failed to connect to rabbitmq", zap.Error(err))
@@ -75,13 +86,10 @@ func main() {
 	}
 	defer ch.Close()
 
-	for _, queue := range []string{queueTelemetry, queueDTC} {
-		if _, err := ch.QueueDeclare(queue, true, false, false, false, nil); err != nil {
-			log.Fatal("failed to declare queue", zap.String("queue", queue), zap.Error(err))
-		}
+	if _, err := ch.QueueDeclare(queueVehicleStateObserved, true, false, false, false, nil); err != nil {
+		log.Fatal("failed to declare queue", zap.String("queue", queueVehicleStateObserved), zap.Error(err))
 	}
 
-	// --- MQTT ---
 	brokerURL := mustEnv("MQTT_BROKER_URL")
 
 	opts := mqtt.NewClientOptions()
@@ -92,14 +100,11 @@ func main() {
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		log.Info("connected to mqtt broker", zap.String("broker", brokerURL))
 		var mu sync.Mutex
-		for suffix := range topicQueues {
-			topic := "torque/vehicles/+/" + suffix
-			token := c.Subscribe(topic, 1, makeHandler(log, ch, &mu, suffix))
-			if token.Wait() && token.Error() != nil {
-				log.Error("failed to subscribe", zap.String("topic", topic), zap.Error(token.Error()))
-			} else {
-				log.Info("subscribed", zap.String("topic", topic))
-			}
+		token := c.Subscribe(stateTopic, 1, makeHandler(log, db, ch, &mu))
+		if token.Wait() && token.Error() != nil {
+			log.Error("failed to subscribe", zap.String("topic", stateTopic), zap.Error(token.Error()))
+		} else {
+			log.Info("subscribed", zap.String("topic", stateTopic))
 		}
 	})
 	opts.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
@@ -120,12 +125,17 @@ func main() {
 	client.Disconnect(500)
 }
 
-func makeHandler(log *zap.Logger, ch *amqp.Channel, mu *sync.Mutex, suffix string) mqtt.MessageHandler {
-	queue := topicQueues[suffix]
+func makeHandler(log *zap.Logger, db *sql.DB, ch *amqp.Channel, mu *sync.Mutex) mqtt.MessageHandler {
 	return func(_ mqtt.Client, msg mqtt.Message) {
-		vin := vinFromTopic(msg.Topic())
-		if vin == "" {
-			log.Warn("could not extract vin from topic", zap.String("topic", msg.Topic()))
+		vehicleID := vehicleIDFromStateTopic(msg.Topic())
+		if vehicleID == "" {
+			log.Warn("could not extract vehicle id from topic", zap.String("topic", msg.Topic()))
+			return
+		}
+
+		deviceID, err := deviceIDByVehicleID(context.Background(), db, vehicleID)
+		if err != nil {
+			log.Error("failed to resolve device by vehicle", zap.String("vehicle_id", vehicleID), zap.Error(err))
 			return
 		}
 
@@ -135,16 +145,16 @@ func makeHandler(log *zap.Logger, ch *amqp.Channel, mu *sync.Mutex, suffix strin
 			return
 		}
 
-		for _, item := range items {
-			item["vin"] = vin
-			body, err := json.Marshal(item)
+		forwarded := 0
+		for i, item := range items {
+			body, err := buildBackendMessage(deviceID, vehicleID, item)
 			if err != nil {
-				log.Error("failed to marshal item", zap.Error(err))
+				log.Warn("invalid state snapshot", zap.String("topic", msg.Topic()), zap.Int("index", i), zap.Error(err))
 				continue
 			}
 
 			mu.Lock()
-			err = ch.PublishWithContext(context.Background(), "", queue, false, false, amqp.Publishing{
+			err = ch.PublishWithContext(context.Background(), "", queueVehicleStateObserved, false, false, amqp.Publishing{
 				ContentType:  "application/json",
 				DeliveryMode: amqp.Persistent,
 				Timestamp:    time.Now(),
@@ -152,36 +162,88 @@ func makeHandler(log *zap.Logger, ch *amqp.Channel, mu *sync.Mutex, suffix strin
 			})
 			mu.Unlock()
 			if err != nil {
-				log.Error("failed to publish to rabbitmq", zap.String("queue", queue), zap.Error(err))
+				log.Error("failed to publish to rabbitmq", zap.String("queue", queueVehicleStateObserved), zap.Error(err))
+				continue
 			}
+			forwarded++
 		}
 
-		log.Debug("forwarded messages",
+		log.Debug("forwarded state snapshots",
 			zap.String("topic", msg.Topic()),
-			zap.String("queue", queue),
-			zap.Int("count", len(items)),
+			zap.String("queue", queueVehicleStateObserved),
+			zap.Int("count", forwarded),
 		)
 	}
 }
 
-func vinFromTopic(topic string) string {
+func deviceIDByVehicleID(ctx context.Context, db *sql.DB, vehicleID string) (string, error) {
+	var deviceID string
+	err := db.QueryRowContext(ctx, `
+		SELECT d.id::text
+		FROM device.devices d
+		JOIN vehicle.vehicles v ON v.id = d.vehicle_id
+		WHERE d.vehicle_id = $1
+		  AND d.deleted_at IS NULL
+		  AND v.deleted_at IS NULL
+		LIMIT 1`, vehicleID).Scan(&deviceID)
+	if err != nil {
+		return "", err
+	}
+	return deviceID, nil
+}
+
+func vehicleIDFromStateTopic(topic string) string {
 	parts := strings.Split(topic, "/")
-	if len(parts) != 4 {
+	if len(parts) != 4 || parts[0] != "torque" || parts[1] != "vehicles" || parts[3] != "state" {
 		return ""
 	}
 	return parts[2]
 }
 
-func unpackPayload(payload []byte) ([]map[string]any, error) {
-	var arr []map[string]any
+func unpackPayload(payload []byte) ([]mqttStateSnapshot, error) {
+	var arr []mqttStateSnapshot
 	if err := json.Unmarshal(payload, &arr); err == nil {
 		return arr, nil
 	}
-	var obj map[string]any
+	var obj mqttStateSnapshot
 	if err := json.Unmarshal(payload, &obj); err != nil {
 		return nil, err
 	}
-	return []map[string]any{obj}, nil
+	return []mqttStateSnapshot{obj}, nil
+}
+
+func buildBackendMessage(deviceID, vehicleID string, item mqttStateSnapshot) ([]byte, error) {
+	if item.ObservedAt == nil || item.ObservedAt.IsZero() {
+		return nil, fmt.Errorf("observed_at is required")
+	}
+	if len(item.State) == 0 {
+		return nil, fmt.Errorf("state is required")
+	}
+	observation := item.Observation
+	if observation == nil {
+		observation = map[string]any{"errors": []any{}}
+	}
+
+	body := map[string]any{
+		"schema_version": 1,
+		"message_id":     newUUIDString(),
+		"device_id":      deviceID,
+		"vehicle_id":     vehicleID,
+		"observed_at":    item.ObservedAt.UTC().Format(time.RFC3339Nano),
+		"state":          item.State,
+		"observation":    observation,
+	}
+	return json.Marshal(body)
+}
+
+func newUUIDString() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func buildTLSConfig(caCertPath, certPath, keyPath, serverName string) (*tls.Config, error) {
