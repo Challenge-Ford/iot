@@ -1,0 +1,97 @@
+name: Build images & deploy infra
+
+# Reusable workflow: builds and pushes the guard/listener images to ECR, then
+# applies the Terraform in infra/ for the given environment.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Target environment (staging or prod)
+        required: true
+        type: string
+      aws_region:
+        description: AWS region
+        required: false
+        type: string
+        default: us-east-1
+    secrets:
+      aws_role_arn:
+        required: true
+      aws_account_id:
+        required: true
+      tf_state_bucket:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: 1.9.8
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        working-directory: infra
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.tf_state_bucket }}" \
+            -backend-config="key=iot/${{ inputs.environment }}/terraform.tfstate" \
+            -backend-config="region=${{ inputs.aws_region }}" \
+            -backend-config="dynamodb_table=torque-terraform-locks" \
+            -backend-config="encrypt=true"
+
+      # Ensure ECR repositories exist before pushing images.
+      - name: Terraform apply (ECR only)
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -var="image_tag=bootstrap" \
+            -target=module.ecr
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push images
+        env:
+          REGISTRY: ${{ secrets.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com
+          TAG: ${{ github.sha }}
+        run: |
+          for component in mqtt-guard mqtt-listener; do
+            repo="$REGISTRY/torque-iot-$component"
+            docker buildx build \
+              --build-arg CMD=$component \
+              --file docker/Dockerfile \
+              --tag "$repo:$TAG" \
+              --tag "$repo:${{ inputs.environment }}" \
+              --push .
+          done
+
+      - name: Terraform apply
+        working-directory: infra
+        run: |
+          terraform apply -auto-approve \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -var="image_tag=${{ github.sha }}"

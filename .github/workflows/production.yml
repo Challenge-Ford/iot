@@ -1,0 +1,22 @@
+name: Production
+
+# On merge/push to main: run the full validation and deploy the prod
+# environment (build + push images, terraform apply).
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    uses: ./.github/workflows/_build-test.yml
+
+  deploy-prod:
+    needs: validate
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: prod
+    secrets:
+      aws_role_arn: ${{ secrets.AWS_ROLE_PROD }}
+      aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      tf_state_bucket: ${{ secrets.TF_STATE_BUCKET }}

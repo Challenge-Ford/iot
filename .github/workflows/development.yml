@@ -1,0 +1,48 @@
+name: Development
+
+# On merge/push to development: run the full validation, deploy the staging
+# environment (build + push images, terraform apply), then open a release PR
+# into main.
+on:
+  push:
+    branches:
+      - development
+
+jobs:
+  validate:
+    uses: ./.github/workflows/_build-test.yml
+
+  deploy-staging:
+    needs: validate
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      environment: staging
+    secrets:
+      aws_role_arn: ${{ secrets.AWS_ROLE_STAGING }}
+      aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      tf_state_bucket: ${{ secrets.TF_STATE_BUCKET }}
+
+  open-release-pr:
+    name: Open release PR to main
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create or update release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh pr view development --base main >/dev/null 2>&1; then
+            echo "Release PR already open"
+          else
+            gh pr create \
+              --base main \
+              --head development \
+              --title "Release: development -> main" \
+              --body "Automated release PR. Staging deploy succeeded; merging promotes these changes to production (\`main\`)."
+          fi
