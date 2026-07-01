@@ -1,8 +1,8 @@
 name: Feature
 
 # feature/** branches: validate on every push, and validate PRs targeting
-# development on every commit. When a feature branch is green, open (or update)
-# a PR into development automatically.
+# development or main on every commit (gates the merge). When a feature branch
+# is green, open (or update) a PR into development automatically.
 on:
   push:
     branches:
@@ -10,6 +10,7 @@ on:
   pull_request:
     branches:
       - development
+      - main
 
 jobs:
   validate:
