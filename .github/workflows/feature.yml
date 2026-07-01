@@ -1,0 +1,44 @@
+name: Feature
+
+# feature/** branches: validate on every push, and validate PRs targeting
+# development or main on every commit (gates the merge). When a feature branch
+# is green, open (or update) a PR into development automatically.
+on:
+  push:
+    branches:
+      - 'feature/**'
+  pull_request:
+    branches:
+      - development
+      - main
+
+jobs:
+  validate:
+    uses: ./.github/workflows/_build-test.yml
+
+  open-pr:
+    name: Open PR to development
+    needs: validate
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create or update PR to development
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="${GITHUB_REF_NAME}"
+          if gh pr view "$branch" --base development >/dev/null 2>&1; then
+            echo "PR already open for $branch"
+          else
+            gh pr create \
+              --base development \
+              --head "$branch" \
+              --title "Feature: $branch" \
+              --body "Automated PR opened after a successful build & test run on \`$branch\`. Merges into \`development\` once required checks pass."
+          fi
